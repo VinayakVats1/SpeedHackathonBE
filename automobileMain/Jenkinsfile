@@ -1,0 +1,263 @@
+properties([
+  buildDiscarder(logRotator(numToKeepStr: '3')),
+  disableConcurrentBuilds(),
+])
+
+library identifier: 'gitflowEnablers_multi@master', retriever: modernSCM([$class: 'GitSCMSource',
+  remote: 'https://pscode.lioncloud.net/psinnersource/devsecops/simplified-pipelines-for-jenkins/gitflowEnablers_multi.git',
+  credentialsId: 'gitlabtoken'])
+
+library identifier: 'build-DockerImage@master',retriever: modernSCM([$class: 'GitSCMSource',
+	remote: 'https://pscode.lioncloud.net/psinnersource/devsecops/simplified-pipelines-for-jenkins/build-DockerImage.git',
+	credentialsId: 'gitlabtoken'])
+
+library identifier: 'notfications_multi@master', retriever: modernSCM([$class: 'GitSCMSource',
+        remote: 'https://pscode.lioncloud.net/psinnersource/devsecops/simplified-pipelines-for-jenkins/notifications_multi.git',
+        credentialsId: 'gitlabtoken'])
+
+library identifier: 'helm-charts_nix@helm-test',retriever: modernSCM([$class: 'GitSCMSource',
+	remote: 'https://pscode.lioncloud.net/engineering-community/devops/simplified-pipelines-for-jenkins/helm-charts_nix.git',
+	credentialsId: 'gitlabtoken'])
+
+def tokens = "${env.JOB_NAME}".tokenize('/')
+def branchName = tokens[tokens.size()-1].replace("%2F","-")
+def (value1, shortBranch) = "${branchName}".tokenize( '-' )
+branchName = env.BRANCH_NAME == "master" ? "master" : "${shortBranch}"
+if(branchName != "master") {branchName = env.BRANCH_NAME == "develop" ? "develop" : "${shortBranch}"}
+
+print(branchName)
+
+pipeline {
+
+   // options { timestamps() }
+
+    environment{
+            PROJECT_NAME = 'PROJECT-NAME'
+            VERSION = 'PROJECT-VERSION'
+            NAMESPACE = 'GROUP-ID'
+            RELEASE_NAME = 'automobileMain-1.0'
+            gitWorkFlow = ''
+            registry= 'harbor.prod.pscloudhub.com'
+            tag = "0.1.${BUILD_NUMBER}"
+            BRANCH_NAME = "${branchName}"
+    }
+
+    agent {
+        kubernetes {
+            label "api-${UUID.randomUUID().toString()}"
+            yaml """
+                apiVersion: v1
+                kind: Pod
+                metadata:
+                  labels:
+                  jenkins: jenkins-pipeline
+                spec:
+                  volumes:
+                  - name: docker-sock
+                    hostPath:
+                      path: /var/run/docker.sock
+                  securityContext:
+                    runAsUser: 0
+                  containers:
+                  - name: docker
+                    image: docker
+                    command:
+                    - cat
+                    tty: true
+                    resources:
+                      requests:
+                        memory: "2500Mi"
+                        cpu: "400m"
+                      limits:
+                        memory: "2500Mi"
+                        cpu: "400m"
+                    volumeMounts:
+                    - mountPath: /var/run/docker.sock
+                      name: docker-sock
+                  - name: node
+                    image: psregistry.pscloudhub.com/tools/node:lts-alpine
+                    imagePullPolicy: Always
+                    command:
+                    - cat
+                    tty: true
+                    resources:
+                      requests:
+                        memory: "300Mi"
+                        cpu: "200m"
+                      limits:
+                        memory: "300Mi"
+                        cpu: "200m"
+                  - name: java-build-tools
+                    image: psregistry.pscloudhub.com/tools/openjdk14:gradle
+                    imagePullPolicy: Always
+                    command:
+                    - cat
+                    tty: true
+                    resources:
+                      requests:
+                        memory: "200Mi"
+                        cpu: "100m"
+                      limits:
+                        memory: "300Mi"
+                        cpu: "200m"
+                  - name: trivy
+                    image: psregistry.pscloudhub.com/tools/aquasec-trivy:0.19.2
+                    imagePullPolicy: Always
+                    command:
+                    - cat
+                    tty: true
+                    resources:
+                      requests:
+                        memory: "4000Mi"
+                        cpu: "600m"
+                      limits:
+                        memory: "4000Mi"
+                        cpu: "600m"
+                    volumeMounts:
+                    - mountPath: /var/run/docker.sock
+                      name: docker-sock
+                  - name: kube-tools
+                    image: psregistry.pscloudhub.com/tools/kube-tools:helm3
+                    imagePullPolicy: Always
+                    command:
+                    - cat
+                    tty: true
+                    resources:
+                      requests:
+                        memory: "2500Mi"
+                        cpu: "300m"
+                      limits:
+                        memory: "2500Mi"
+                        cpu: "300m"
+                 slaveConnectTimeout: 180
+                    volumeMounts:
+                    - mountPath: /var/run/docker.sock
+                      name: docker-sock                    
+            """
+        }
+    }
+
+    stages {
+
+      
+        /*stage ("Sonarqube") {
+          steps {
+            container('sonar-scanner-tools') {
+              runSonar{}
+            }
+          }
+        }
+        
+        
+        stage ('Unit Test') {
+          steps{
+            container('java-build-tools') {
+              runUnitTest(archType: 'Java', buildTool: 'maven')
+            }
+          }
+        }
+        
+        
+        */
+
+        
+        stage('Build') {
+          steps{
+          script{
+            container('java-build-tools'){
+        
+        
+        
+          withCredentials([usernamePassword(credentialsId: 'harbor-sho', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+  
+          sh """
+            
+              gradle build
+            
+              echo ${BRANCH_NAME}
+            """
+            
+          }
+          
+          
+          
+            }
+            }
+          }
+        }
+        
+        
+        stage('Docker: Build') {
+          steps {
+            container('docker') {
+              echo "Deploying api ...."
+                dockerBuild()
+           }
+          }
+        }
+
+
+          stage('Docker: SecurityScan ') {
+          steps {
+            container('trivy') {
+              echo "Deploying api ...."
+                dockerScan()
+            }
+          }
+        }
+          
+          stage('Docker: Publish') {
+          when { 
+            anyOf {
+              branch 'develop'
+              branch 'master'
+            }
+          }
+          steps {
+            container('docker') {
+              echo "Deploying api ...."
+                dockerPublish()
+              }
+            }
+          }
+
+
+        stage('Helm Deploy') {
+                when { 
+    anyOf {
+            branch 'develop'
+            branch 'master'
+            
+            }
+
+        }
+          steps {
+            container('kube-tools') {
+              echo "Build and push docker image"
+            
+                
+                  helmdeploy()
+
+           }
+          }
+          }
+
+
+
+        stage('Reporting') {
+          steps {
+            container('puppeteer') {
+              //blueOceanScreenShot()
+            }
+          }
+        }
+ }
+
+  post {
+    always {
+     // emailNotify()
+     sh "echo skip"
+     
+    }
+  }
+}

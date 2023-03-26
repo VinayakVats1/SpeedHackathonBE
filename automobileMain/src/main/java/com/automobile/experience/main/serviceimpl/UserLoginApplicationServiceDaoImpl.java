@@ -24,7 +24,8 @@ public class UserLoginApplicationServiceDaoImpl implements UserLoginApplicationS
 
 	@Override
 	public List<UserLogin> getUseridList() {
-		return null;
+		List<UserLogin> employee = userLoginRepository.findAll();
+		return employee;
 	}
 
 	@Override
